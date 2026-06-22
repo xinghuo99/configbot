@@ -1,0 +1,8 @@
+{
+    "extraPaths": [
+        "f:/myproject"
+    ],
+    "pythonVersion": "3.12",
+    "pythonPlatform": "Windows",
+    "typeCheckingMode": "basic"
+}
