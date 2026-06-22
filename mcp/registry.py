@@ -59,11 +59,13 @@ class MCPRegistry:
     # ── 统一查询 ──
 
     def get_all_tools(self) -> List[dict]:
-        """获取所有 MCP Server 提供的工具 schema"""
+        """获取所有 MCP Server 提供的工具 schema（含 server 名称）"""
         schemas = []
         for server in self._servers.values():
             for tool in server.get_tools():
-                schemas.append(tool.to_dict())
+                schema = tool.to_dict()
+                schema["server"] = server.name
+                schemas.append(schema)
         return schemas
 
     def find_tool_server(self, tool_name: str) -> Optional[MCPServer]:

@@ -279,13 +279,14 @@ class Agent:
     def _route_intent(
         self, user_input: str, context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """意图路由（简化版，生产环境由 LLM 判断）
+        """意图路由：基于自然语言的自主工具选择
 
-        路由优先级: Skill > 显式指令 > LLM 兜底
+        路由优先级：Skill 生命周期指令 > 显式 Skill > 评分匹配 > LLM > 查询
 
-        支持两种方式触发 Skill：
-        1. 关键词匹配：skill 名称或描述中含有关键词
-        2. 直接指定：输入 "skill:技能名" 格式
+        评分匹配规则：
+        1. 对 Skill、Tool、MCP 三类分别计算相关性评分
+        2. 按评分从高到低选择最佳匹配
+        3. 自动提取自然语言中的参数
         """
         inp = user_input.lower().strip()
 
@@ -315,16 +316,17 @@ class Agent:
             skill_name = user_input.split(":", 1)[1].strip()
             return {"type": "skill", "name": skill_name}
 
-        # 内置 Skill 关键词匹配
-        if "审查" in inp or "review" in inp:
-            return {"type": "skill", "name": "code_review"}
-        if "安全" in inp or "security" in inp or "漏洞" in inp:
-            return {"type": "skill", "name": "security_review"}
+        # ── 信息查询意图 ──
+        if self._is_info_query(inp):
+            return {"type": "query"}
 
-        # 动态匹配外部 Skill：按名称/描述搜索
-        matched = self.skill_registry.find_by_keyword(inp)
-        if matched:
-            return {"type": "skill", "name": matched[0].name}
+        # ── 评分匹配：对所有可用资源进行评分 ──
+        candidates = self._score_all_resources(user_input, context)
+
+        if candidates:
+            best = candidates[0]
+            if best["score"] > 0:
+                return best["intent"]
 
         # 如果配置了 LLM，交给 LLM 处理
         if self._llm_callback:
@@ -332,6 +334,240 @@ class Agent:
 
         # 默认：信息查询
         return {"type": "query"}
+
+    # ── 意图匹配辅助方法 ──
+
+    def _is_info_query(self, inp: str) -> bool:
+        """判断是否为信息查询类意图"""
+        info_patterns = [
+            "你能做什么", "你会什么", "帮助", "功能",
+            "你是谁", "介绍", "有哪些能力", "可以做什么",
+            "what can you do", "help", "capabilities",
+        ]
+        return any(p in inp for p in info_patterns)
+
+    def _score_all_resources(
+        self, user_input: str, context: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """对所有可用资源（Skill/Tool/MCP）进行评分匹配
+
+        返回按评分降序排列的候选列表。
+        """
+        candidates = []
+
+        # 1. 对 Skill 评分
+        for skill in self.skill_registry.list_all():
+            score = self._score_match(user_input, skill.name, skill.description)
+            if score > 0:
+                params = self._extract_params(user_input, [])
+                candidates.append({
+                    "score": score + 5,  # Skill 优先加分
+                    "intent": {"type": "skill", "name": skill.name, "params": params},
+                })
+
+        # 2. 对 Tool 评分
+        for tool in self.tool_registry.list_all():
+            score = self._score_match(user_input, tool.name, tool.description)
+            if score > 0:
+                schema = tool.get_schema()
+                param_names = list(schema.get("parameters", {}).get("properties", {}).keys())
+                params = self._extract_params(user_input, param_names)
+                candidates.append({
+                    "score": score,
+                    "intent": {"type": "tool", "name": tool.name, "params": params},
+                })
+
+        # 3. 对 MCP 工具评分
+        for schema in self.mcp_manager.get_all_tool_schemas():
+            score = self._score_match(
+                user_input,
+                f"{schema.get('server', '')}/{schema.get('name', '')}",
+                schema.get("description", ""),
+            )
+            if score > 0:
+                param_names = list(schema.get("parameters", {}).get("properties", {}).keys())
+                params = self._extract_params(user_input, param_names)
+                candidates.append({
+                    "score": score,
+                    "intent": {
+                        "type": "mcp",
+                        "server": schema.get("server", ""),
+                        "name": schema.get("name", ""),
+                        "params": params,
+                    },
+                })
+
+        # 按评分降序排列
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates
+
+    def _score_match(self, user_input: str, name: str, description: str) -> int:
+        """计算用户输入与资源（名称+描述）的匹配评分
+
+        评分规则：
+        - 名称完全匹配: +10
+        - 名称包含在输入中: +8
+        - 输入关键词在名称中: +6
+        - 描述关键词匹配: +4/个
+        - 中文语义关键词匹配: +3/个
+        """
+        inp = user_input.lower()
+        name_lower = name.lower()
+        desc_lower = description.lower() if description else ""
+        score = 0
+
+        # 名称匹配
+        if name_lower == inp:
+            score += 10
+        elif name_lower in inp:
+            score += 8
+        elif any(word in name_lower for word in inp.split() if len(word) >= 2):
+            score += 6
+
+        # 描述关键词匹配
+        for word in inp.split():
+            if len(word) >= 2 and word in desc_lower:
+                score += 4
+
+        # 中文语义映射（常见动词 → 工具/技能）
+        semantic_map = {
+            "读取": ["read", "file_info", "text_stats"],
+            "读": ["read", "file_info"],
+            "查看": ["list", "file_info", "read", "info", "get"],
+            "显示": ["list", "read", "info", "get"],
+            "列出": ["list", "list_dir"],
+            "目录": ["list_dir", "list"],
+            "文件": ["file", "read_file", "file_info", "delete_file"],
+            "天气": ["weather", "baidu"],
+            "搜索": ["search", "web_search"],
+            "获取": ["fetch", "get", "read"],
+            "抓取": ["fetch", "web_fetch"],
+            "网页": ["web", "fetch", "search"],
+            "命令": ["run_command", "cmd"],
+            "执行": ["run_command", "execute"],
+            "环境": ["get_env", "env"],
+            "变量": ["get_env", "env"],
+            "格式化": ["format", "json_format"],
+            "json": ["json_format", "json_validator"],
+            "模板": ["template", "text_template"],
+            "审查": ["code_review", "review"],
+            "安全": ["security_review", "security"],
+            "漏洞": ["security_review", "security"],
+            "csv": ["csv_converter"],
+            "转换": ["csv_converter", "text_translator"],
+            "统计": ["text_stats", "code_stats"],
+            "去重": ["data_deduplicator", "deduplicator"],
+            "备份": ["file_backup", "data_backup", "backup"],
+            "日志": ["log_analyzer", "log"],
+            "分析": ["log_analyzer", "analyze"],
+            "翻译": ["text_translator", "translate"],
+            "报告": ["report_generator", "report"],
+            "生成": ["report_generator", "generate"],
+            "验证": ["json_validator", "validate"],
+            "删除": ["delete_file", "delete"],
+            "删除文件": ["delete_file"],
+            "写入": ["write_file", "write"],
+            "写文件": ["write_file"],
+            "保存": ["write_file", "save"],
+            "计算": ["calculator", "calculate"],
+            "回显": ["echo"],
+            "http": ["http_post", "web_fetch"],
+            "post": ["http_post"],
+        }
+
+        for cn_word, target_keywords in semantic_map.items():
+            if cn_word in inp:
+                for kw in target_keywords:
+                    if kw in name_lower or kw in desc_lower:
+                        score += 3
+
+        return score
+
+    def _extract_params(
+        self, user_input: str, param_names: List[str]
+    ) -> Dict[str, Any]:
+        """从自然语言中提取工具参数
+
+        支持的参数名及提取方式：
+        - file_path / path / dir_path: 提取文件路径
+        - city / location: 提取城市名
+        - expression: 提取数学表达式
+        - message / text: 提取剩余文本
+        - url: 提取 URL
+        """
+        import re
+
+        params = {}
+
+        for pname in param_names:
+            if pname in ("file_path", "path", "dir_path"):
+                # 提取文件路径
+                fp = self._extract_file_path(user_input)
+                if fp:
+                    params[pname] = fp
+
+            elif pname in ("city", "location"):
+                # 提取城市名（中文城市名模式）
+                city_match = re.search(
+                    r'(?:城市|查询|在|的)?([\u4e00-\u9fff]{2,4}?)(?:的|天气|气温|温度|预报)',
+                    user_input,
+                )
+                if city_match:
+                    # 过滤掉常见非城市词
+                    city = city_match.group(1)
+                    non_city = {"帮我", "查询", "获取", "显示", "请", "我想", "当前"}
+                    if city not in non_city:
+                        params[pname] = city
+
+            elif pname == "expression":
+                # 提取数学表达式
+                expr_match = re.search(
+                    r'[\d\s+\-*/().]+', user_input
+                )
+                if expr_match:
+                    expr = expr_match.group(0).strip()
+                    if any(c.isdigit() for c in expr):
+                        params[pname] = expr
+
+            elif pname in ("message", "text", "content"):
+                # 提取消息文本（去除命令词后的内容）
+                # 简单实现：提取引号内的内容或最后一段
+                quoted = re.findall(r'["""]([^"""]+)["\""]', user_input)
+                if quoted:
+                    params[pname] = quoted[0]
+                else:
+                    # 取关键词后的内容
+                    params[pname] = user_input
+
+            elif pname == "url":
+                url_match = re.search(
+                    r'(https?://[^\s]+)', user_input
+                )
+                if url_match:
+                    params[pname] = url_match.group(1)
+
+            elif pname in ("key", "name"):
+                # 提取 key=value 或特定格式
+                kv_match = re.search(rf'{pname}[=:：]\s*(\S+)', user_input)
+                if kv_match:
+                    params[pname] = kv_match.group(1)
+
+        return params
+
+    @staticmethod
+    def _extract_file_path(text: str) -> Optional[str]:
+        """从文本中提取文件路径"""
+        import re
+        patterns = [
+            r'([\w./\\-]+\.(?:py|txt|json|yaml|yml|md|csv|log|xml|ini|cfg|toml))',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                path = match.group(1)
+                if not path.startswith(('http://', 'https://')):
+                    return path
+        return None
 
     async def _handle_tool_call(
         self, intent: dict, context: dict
@@ -342,7 +578,18 @@ class Agent:
         if not tool:
             return {"type": "tool", "success": False, "error": f"工具不存在: {tool_name}"}
 
-        result = await tool.execute(**intent.get("params", {}))
+        # 合并参数：intent 中的自动提取参数 + context 中的上下文参数
+        params = {**context, **intent.get("params", {})}
+        # 过滤掉非工具参数
+        schema = tool.get_schema()
+        param_names = set(schema.get("parameters", {}).get("properties", {}).keys())
+        if param_names:
+            params = {k: v for k, v in params.items() if k in param_names}
+
+        # 为常见参数提供默认值
+        self._apply_default_params(param_names, params)
+
+        result = await tool.execute(**params)
         return {
             "type": "tool",
             "tool_name": tool_name,
@@ -350,6 +597,21 @@ class Agent:
             "data": result.data,
             "error": result.error,
         }
+
+    @staticmethod
+    def _apply_default_params(param_names: set, params: Dict[str, Any]) -> None:
+        """为缺失的常见参数补充默认值"""
+        defaults = {
+            "dir_path": ".",
+            "path": ".",
+            "file_path": ".",
+            "indent": 2,
+            "days": 3,
+            "format": "markdown",
+        }
+        for key, default_val in defaults.items():
+            if key in param_names and key not in params:
+                params[key] = default_val
 
     async def _handle_mcp_call(
         self, intent: dict, context: dict
@@ -389,7 +651,10 @@ class Agent:
                 "error": f"前置工具缺失: {missing}",
             }
 
-        result = await skill.execute(context, self._tool_executor, self._mcp_executor)
+        # 合并参数：intent 中的自动提取参数 + context 中的上下文参数
+        merged_context = {**context, **intent.get("params", {})}
+
+        result = await skill.execute(merged_context, self._tool_executor, self._mcp_executor)
         return {
             "type": "skill",
             "skill_name": skill_name,
@@ -402,7 +667,12 @@ class Agent:
     async def _handle_llm_call(
         self, user_input: str, context: dict
     ) -> Dict[str, Any]:
-        """委托给 LLM 处理（需注入回调）"""
+        """委托给 LLM 处理（需注入回调）
+
+        LLM 返回的 intent 可能有两种：
+        1. 工具/技能调用意图 → 直接执行对应的工具/技能
+        2. 纯文本回复 → 直接返回
+        """
         if not self._llm_callback:
             return {"type": "llm", "success": False, "error": "LLM 回调未配置"}
 
@@ -412,8 +682,28 @@ class Agent:
             "available_skills": self.skill_registry.get_all_info(),
             "user_context": context,
         }
-        result = await self._llm_callback(user_input, llm_context)
-        return {"type": "llm", "success": True, "data": result}
+
+        try:
+            llm_intent = await self._llm_callback(user_input, llm_context)
+        except Exception as e:
+            logger.exception("LLM 回调执行异常")
+            return {"type": "llm", "success": False, "error": f"LLM 调用异常: {e}"}
+
+        # LLM 返回了工具/技能调用意图 → 直接执行
+        intent_type = llm_intent.get("type", "")
+        if intent_type == "tool":
+            return await self._handle_tool_call(llm_intent, context)
+        elif intent_type == "skill":
+            return await self._handle_skill_call(llm_intent, context)
+        elif intent_type == "mcp":
+            return await self._handle_mcp_call(llm_intent, context)
+
+        # LLM 返回了纯文本回复
+        return {
+            "type": "llm",
+            "success": True,
+            "data": llm_intent.get("data", str(llm_intent)),
+        }
 
     async def _handle_query(
         self, user_input: str, context: dict
@@ -610,6 +900,7 @@ class Agent:
             new_description=intent.get("new_description"),
             new_category=intent.get("new_category"),
             new_requires_tools=intent.get("new_requires_tools"),
+            new_context_keys=intent.get("new_context_keys"),
         )
         return {"type": "skill_update", **result}
 

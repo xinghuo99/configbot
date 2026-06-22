@@ -65,6 +65,63 @@ class {{class_name}}(BaseSkill):
 '''
 
 
+# ── Skill 文档（Markdown）模板 ──
+
+SKILL_MD_TEMPLATE = """# {{display_name}}
+
+> **版本**: {{version}} | **分类**: {{category_label}} | **创建时间**: {{created_at}}
+
+---
+
+## 概述
+
+{{description}}
+
+## 基本信息
+
+| 属性 | 值 |
+|------|-----|
+| 名称 | `{{name}}` |
+| 版本 | {{version}} |
+| 分类 | {{category_label}} |
+| 依赖工具 | {{requires_tools_display}} |
+
+## 输入参数
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+{{context_keys_table}}
+
+## 执行步骤
+
+{{operations_display}}
+
+## 使用示例
+
+```python
+from configbot.agent import Agent
+
+agent = Agent()
+result = await agent.run("skill:{{name}}", {
+{{context_keys_example}}
+})
+print(result)
+```
+
+## 约束与注意事项
+
+- 本 Skill 由 ConfigBot 自动生成，基于模板创建
+- 执行前请确保依赖的工具已注册到 Agent 中
+- {{notes}}
+
+## 变更历史
+
+| 版本 | 日期 | 变更说明 |
+|------|------|----------|
+| {{version}} | {{created_at}} | 初始版本 |
+"""
+
+
 def _snake_to_camel(name: str) -> str:
     """snake_case → CamelCase"""
     return "".join(w.capitalize() for w in name.split("_"))
@@ -103,6 +160,14 @@ class SkillManager:
         self._registry = registry
         self._reload_callback = reload_callback
         self._skills_dir.mkdir(parents=True, exist_ok=True)
+
+    _CATEGORY_LABELS = {
+        "code": "代码",
+        "security": "安全",
+        "data": "数据处理",
+        "deploy": "部署",
+        "custom": "自定义",
+    }
 
     # ── 公共 API ──
 
@@ -156,6 +221,19 @@ class SkillManager:
         file_path = self._skills_dir / f"{name}.py"
         file_path.write_text(code, encoding="utf-8")
 
+        # 生成并写入 Markdown 文档
+        md_content = self._generate_skill_md(
+            name=name,
+            description=description,
+            category=category,
+            version="1.0.0",
+            requires_tools=requires_tools or [],
+            context_keys=context_keys or [],
+            operations=operations,
+        )
+        md_path = self._skills_dir / f"{name}.md"
+        md_path.write_text(md_content, encoding="utf-8")
+
         # 重载
         reload_result = self._reload()
         loaded = name in reload_result.get("added", []) or name in self._registry
@@ -175,6 +253,7 @@ class SkillManager:
         new_description: Optional[str] = None,
         new_category: Optional[str] = None,
         new_requires_tools: Optional[List[str]] = None,
+        new_context_keys: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """更新现有 Skill 并重新加载（Skill 进化）
 
@@ -186,6 +265,7 @@ class SkillManager:
             new_description: 新的功能描述
             new_category: 新的分类
             new_requires_tools: 新的依赖工具列表
+            new_context_keys: 新的上下文参数列表
 
         Returns:
             {"success": bool, "skill_name": str, "old_version": str, "new_version": str, ...}
@@ -206,9 +286,13 @@ class SkillManager:
 
         # 备份旧文件
         file_path = self._skills_dir / f"{name}.py"
+        md_path = self._skills_dir / f"{name}.md"
         if file_path.exists():
             backup_path = self._skills_dir / f"{name}.py.{old_version}.bak"
             file_path.rename(backup_path)
+        if md_path.exists():
+            md_backup_path = self._skills_dir / f"{name}.md.{old_version}.bak"
+            md_path.rename(md_backup_path)
 
         # 生成新代码
         code = self._generate_skill_code(
@@ -221,6 +305,18 @@ class SkillManager:
         )
 
         file_path.write_text(code, encoding="utf-8")
+
+        # 重新生成 Markdown 文档
+        md_content = self._generate_skill_md(
+            name=name,
+            description=description,
+            category=category,
+            version=new_version,
+            requires_tools=requires_tools,
+            context_keys=(new_context_keys or []),
+            operations=new_operations or "",
+        )
+        md_path.write_text(md_content, encoding="utf-8")
 
         # 先注销旧版本，再重载
         self._registry.unregister(name)
@@ -261,15 +357,17 @@ class SkillManager:
 
         # 删除文件
         deleted_files = []
-        file_path = self._skills_dir / f"{name}.py"
-        if file_path.exists():
-            file_path.unlink()
-            deleted_files.append(str(file_path))
+        for ext in [".py", ".md"]:
+            f = self._skills_dir / f"{name}{ext}"
+            if f.exists():
+                f.unlink()
+                deleted_files.append(str(f))
 
-        # 删除备份文件
-        for bak in self._skills_dir.glob(f"{name}.py.*.bak"):
-            bak.unlink()
-            deleted_files.append(str(bak))
+        # 删除备份文件（.py 和 .md）
+        for pattern in [f"{name}.py.*.bak", f"{name}.md.*.bak"]:
+            for bak in self._skills_dir.glob(pattern):
+                bak.unlink()
+                deleted_files.append(str(bak))
 
         return {
             "success": True,
@@ -301,6 +399,66 @@ class SkillManager:
         return None
 
     # ── 内部方法 ──
+
+    def _generate_skill_md(
+        self,
+        name: str,
+        description: str,
+        category: str,
+        version: str = "1.0.0",
+        requires_tools: Optional[List[str]] = None,
+        context_keys: Optional[List[str]] = None,
+        operations: str = "",
+        change_note: str = "初始版本",
+    ) -> str:
+        """生成 Skill 的 Markdown 文档"""
+        from datetime import datetime
+
+        requires_tools = requires_tools or []
+        context_keys = context_keys or []
+
+        display_name = _snake_to_camel(name)
+        category_label = self._CATEGORY_LABELS.get(category, category)
+        tools_display = ", ".join(f"`{t}`" for t in requires_tools) if requires_tools else "无"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 参数表格
+        if context_keys:
+            context_table = "\n".join(
+                f"| {k} | string | 是 | {k} 参数 |" for k in context_keys
+            )
+            context_example = "\n".join(f'    "{k}": "...",' for k in context_keys)
+        else:
+            context_table = "| （无参数） | - | - | - |"
+            context_example = '    # 无需额外参数'
+
+        # 操作步骤
+        if operations:
+            ops_lines = [f"{i+1}. {step}" for i, step in enumerate(operations.split("\n")) if step.strip()]
+            ops_display = "\n".join(ops_lines) if ops_lines else operations
+        else:
+            ops_display = "1. 执行 `{{name}}` 的核心逻辑\n2. 返回执行结果"
+
+        # 注意事项
+        notes = f"当前版本 {version}，如需升级请使用 `优化skill {name}` 指令"
+        if requires_tools:
+            notes += f"\n- 依赖工具: {', '.join(requires_tools)}"
+
+        return (
+            SKILL_MD_TEMPLATE.replace("{{display_name}}", display_name)
+            .replace("{{name}}", name)
+            .replace("{{description}}", description)
+            .replace("{{version}}", version)
+            .replace("{{category}}", category)
+            .replace("{{category_label}}", category_label)
+            .replace("{{requires_tools_display}}", tools_display)
+            .replace("{{context_keys_table}}", context_table)
+            .replace("{{context_keys_example}}", context_example)
+            .replace("{{operations_display}}", ops_display)
+            .replace("{{notes}}", notes)
+            .replace("{{created_at}}", now)
+            .replace("{{change_note}}", change_note)
+        )
 
     def _generate_skill_code(
         self,
