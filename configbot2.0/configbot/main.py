@@ -30,7 +30,7 @@ from configbot.tools import BaseTool, ToolExecResult
 from configbot.mcp import MCPServer, MCPResponse, MCPTool
 from configbot.skills import BaseSkill, SkillCategory, SkillExecResult
 from configbot.llm import LLMClient, create_llm_client
-from configbot.logger import log_info
+from configbot.logger import log_info, log_stream
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -251,9 +251,11 @@ async def chat_main(llm_client: Optional[LLMClient] = None):
             session._print_status()
             continue
 
-        # 即时处理并输出结果
-        response = await session.chat(user_input)
-        log_info(f"\n{response}\n")
+        # 即时处理并输出结果（流式）
+        log_info("")  # 换行
+        async for chunk in session.chat_stream(user_input):
+            log_stream(chunk)
+        log_info("")  # 换行
 
 
 async def chat_once(query: str, llm_client: Optional[LLMClient] = None):

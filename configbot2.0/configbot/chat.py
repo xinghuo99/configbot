@@ -89,6 +89,63 @@ class ChatSession:
 
         return response
 
+    async def chat_stream(self, user_input: str):
+        """流式处理单轮对话，逐 chunk 产出响应文本
+
+        当 LLM 返回文本回复时，逐 token 流式输出；
+        当匹配到工具/技能时，一次性产出格式化结果。
+
+        Yields:
+            str: 响应文本的增量片段
+        """
+        self._turn_count += 1
+        self.history.append({"role": "user", "content": user_input})
+
+        enriched_context = self._build_context(user_input)
+
+        # 先尝试 Agent 路由（工具/技能/LLM 意图）
+        try:
+            result = await self.agent.run(user_input, enriched_context)
+        except Exception as e:
+            logger.exception("Agent.run 异常")
+            yield f"[错误] 处理请求时发生异常: {e}"
+            return
+
+        # 如果是 LLM 纯文本回复且配置了 LLM → 流式输出
+        if result.get("type") == "llm" and result.get("success") and self.llm_client:
+            full_response = ""
+            try:
+                system_prompt = self._build_llm_system_prompt()
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                # 带上历史上下文
+                for h in self.history[-10:]:
+                    messages.append(h)
+                async for chunk in self.llm_client.chat_stream(messages):
+                    yield chunk
+                    full_response += chunk
+            except Exception as e:
+                logger.exception("LLM 流式调用异常")
+                yield f"\n[LLM 流式异常: {e}]"
+                full_response = result.get("data", str(result))
+        else:
+            # 工具/技能/其他结果 → 一次性输出
+            full_response = self._format_response(result)
+            yield full_response
+
+        self._update_context(user_input, result)
+        self.history.append({"role": "assistant", "content": full_response})
+
+    def _build_llm_system_prompt(self) -> str:
+        """构建 LLM 流式聊天用的系统提示词"""
+        from .llm.client import _build_system_prompt
+        return _build_system_prompt(
+            self.agent.tool_registry.get_all_schemas(),
+            self.agent.skill_registry.get_all_info(),
+            self.agent.mcp_manager.get_all_tool_schemas(),
+        )
+
     async def run_repl(self, user_inputs: List[str]) -> None:
         """按顺序处理传入的用户输入列表
 
@@ -270,8 +327,6 @@ class ChatSession:
 
         if result.get("hint"):
             lines.append(f"\n提示: {result['hint']}")
-        if not summary["llm_configured"]:
-            lines.append("\n提示: 当前未配置 LLM，使用关键词匹配模式。配置 LLM 可获得更智能的响应。")
 
         return "\n".join(lines)
 

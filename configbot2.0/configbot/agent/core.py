@@ -316,8 +316,8 @@ class Agent:
             skill_name = user_input.split(":", 1)[1].strip()
             return {"type": "skill", "name": skill_name}
 
-        # ── 信息查询意图 ──
-        if self._is_info_query(inp):
+        # ── 信息查询意图（仅无 LLM 时启用，有 LLM 时交给 LLM 回答）──
+        if not self._llm_callback and self._is_info_query(inp):
             return {"type": "query"}
 
         # ── 评分匹配：对所有可用资源进行评分 ──
@@ -709,14 +709,16 @@ class Agent:
         self, user_input: str, context: dict
     ) -> Dict[str, Any]:
         """默认查询处理：展示可用能力"""
-        return {
+        result = {
             "type": "info",
             "message": f"[{self.name}] 收到查询: {user_input}",
             "available_tools": len(self.tool_registry),
             "available_mcp_servers": len(self.mcp_registry.list_servers()),
             "available_skills": len(self.skill_registry),
-            "hint": "配置 LLM 回调以启用 AI 推理: agent.set_llm(my_llm_function)",
         }
+        if not self._llm_callback:
+            result["hint"] = "配置 LLM 回调以启用 AI 推理: agent.set_llm(my_llm_function)"
+        return result
 
     # ── 便捷方法 ──
 

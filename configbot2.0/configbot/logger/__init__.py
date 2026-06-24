@@ -89,3 +89,16 @@ def log_info(message: str, level: str = "info") -> None:
     print(message)
     _log_fn = getattr(_log, level, _log.info)
     _log_fn(message)
+
+
+def log_stream(message: str, end: str = "") -> None:
+    """流式输出到控制台（不换行），同时累积写入日志。
+
+    用于 LLM 流式响应的逐 token 输出。
+
+    Args:
+        message: 要输出的文本片段。
+        end: print 的结束符，默认空字符串（不换行）。
+    """
+    print(message, end=end, flush=True)
+    _log.info(message)

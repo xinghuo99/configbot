@@ -126,6 +126,41 @@ class LLMClient:
         response = await self.chat(messages)
         return response.choices[0].message.content or ""
 
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """流式聊天：逐 token 返回 LLM 回复
+
+        用于需要实时显示输出的场景。
+
+        Args:
+            messages: 消息列表
+            temperature: 温度参数
+            max_tokens: 最大输出 token
+
+        Yields:
+            str: 每个文本增量（delta）
+        """
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature or self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream": True,
+        }
+
+        logger.debug("LLM 流式请求: model=%s, messages=%d", self.model, len(messages))
+
+        stream = await self.client.chat.completions.create(**kwargs)
+
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
     # ── Agent 回调生成 ──
 
     def create_agent_callback(self) -> Callable:
