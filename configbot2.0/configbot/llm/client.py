@@ -267,10 +267,11 @@ def _build_system_prompt(
         parts.append("")
 
     parts.append("## 指令")
-    parts.append("1. 如果用户只是问候或询问能力，直接回复，不要调用工具。")
-    parts.append("2. 如果用户请求执行具体操作，选择合适的工具/技能调用。")
-    parts.append("3. 工具调用时，从用户输入中提取参数值。")
-    parts.append("4. 回复使用中文，简洁明了。")
+    parts.append("1. 优先匹配工具(tool__)而不是技能(skill__)。如果用户输入与某个工具的名称或描述高度匹配，直接使用该工具。")
+    parts.append("2. 技能(skill__)适用于需要多步骤分析的任务（如代码审查、安全扫描），不适用于简单的查询操作。")
+    parts.append("3. 如果用户只是问候或询问能力，直接回复，不要调用工具。")
+    parts.append("4. 工具调用时，从用户输入中提取参数值。")
+    parts.append("5. 回复使用中文，简洁明了。")
 
     return "\n".join(parts)
 

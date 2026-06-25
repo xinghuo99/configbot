@@ -715,6 +715,10 @@ class Agent:
             logger.exception("LLM 回调执行异常")
             return {"type": "llm", "success": False, "error": f"LLM 调用异常: {e}"}
 
+        # ── 后验证：用关键词匹配交叉校验 LLM 的选择 ──
+        # 防止 LLM 幻觉导致选错工具（如把"查询群组成员部门"路由到 security_review）
+        llm_intent = self._validate_llm_intent(user_input, llm_intent)
+
         # LLM 返回了工具/技能调用意图 → 直接执行
         intent_type = llm_intent.get("type", "")
         if intent_type == "tool":
@@ -745,6 +749,58 @@ class Agent:
         if not self._llm_callback:
             result["hint"] = "配置 LLM 回调以启用 AI 推理: agent.set_llm(my_llm_function)"
         return result
+
+    def _validate_llm_intent(
+        self, user_input: str, llm_intent: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """用关键词匹配交叉校验 LLM 的意图选择
+
+        当关键词匹配找到高置信度（score >= 8）的匹配，且与 LLM 选择不同时，
+        优先使用关键词匹配结果，防止 LLM 幻觉导致的错误路由。
+
+        Args:
+            user_input: 用户原始输入
+            llm_intent: LLM 返回的意图
+
+        Returns:
+            校正后的意图（可能与输入相同）
+        """
+        candidates = self._score_all_resources(user_input, {})
+        if not candidates:
+            return llm_intent
+
+        best = candidates[0]
+        # 高置信度阈值：score >= 8 表示名称匹配（名称包含在输入中）
+        if best["score"] < 8:
+            return llm_intent
+
+        kw_name = best["intent"].get("name", "")
+        llm_name = llm_intent.get("name", "")
+        if kw_name and llm_name and kw_name != llm_name:
+            logger.info(
+                "LLM 选择了 %s(%s)，但关键词匹配到 %s(%s) (score=%d)，使用关键词匹配结果",
+                llm_name, llm_intent.get("type", ""),
+                kw_name, best["intent"].get("type", ""),
+                best["score"],
+            )
+            return best["intent"]
+
+        # 名称相同但 LLM 可能漏参数：用关键词匹配的参数补充
+        if kw_name and kw_name == llm_name:
+            kw_params = best["intent"].get("params", {})
+            llm_params = llm_intent.get("params", {})
+            if kw_params:
+                # 关键词匹配参数优先（更可靠），LLM 参数作为补充
+                merged = dict(llm_params)
+                merged.update(kw_params)
+                llm_intent["params"] = merged
+                missing = [k for k in kw_params if k not in llm_params]
+                if missing:
+                    logger.info(
+                        "LLM 漏参数 %s，已从关键词匹配补充", missing
+                    )
+
+        return llm_intent
 
     # ── 便捷方法 ──
 
