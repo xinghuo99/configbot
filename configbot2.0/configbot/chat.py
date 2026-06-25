@@ -436,20 +436,23 @@ class ChatSession:
             required = schema.get("required", [])
             if not props:
                 return ""
-            if required:
-                first = required[0]
-                prop_info = props.get(first, {})
+            # 生成所有 required 参数的示例
+            parts = []
+            for pname in required:
+                prop_info = props.get(pname, {})
                 ptype = prop_info.get("type", "string")
                 if ptype == "string":
-                    val = f'"<{first}>"'
+                    val = f'"<{pname}>"'
                 elif ptype in ("integer", "number"):
                     val = "1"
                 else:
                     val = "true"
-                return f'"{tool.name} {first}={val}"'
-            else:
-                first = list(props.keys())[0]
-                return f'"{tool.name}"'
+                parts.append(f"{pname}={val}")
+            if parts:
+                return f'"{tool.name} {" ".join(parts)}"'
+            # 没有 required 参数时，取第一个可选参数
+            first = list(props.keys())[0]
+            return f'"{tool.name}"'
         except Exception:
             return ""
 

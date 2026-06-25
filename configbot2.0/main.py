@@ -201,6 +201,7 @@ class CodeStatsSkill(BaseSkill):
 # ═══════════════════════════════════════════════════════════════
 # 统一聊天入口
 # ═══════════════════════════════════════════════════════════════
+from configbot.tools.builtin.iright import IrightTool
 
 async def chat_main(llm_client: Optional[LLMClient] = None):
     """统一的聊天入口：交互式 REPL 模式
@@ -210,7 +211,8 @@ async def chat_main(llm_client: Optional[LLMClient] = None):
     from configbot.chat import ChatSession
 
     agent = Agent()
-    # 注册自定义扩展
+    # 注册自定义扩展工具
+    agent.register_tool(IrightTool())
     agent.register_tool(EchoTool())
     agent.register_tool(CalculatorTool())
     agent.register_mcp_server(WeatherMCPServer())

@@ -494,6 +494,8 @@ class Agent:
         - expression: 提取数学表达式
         - message / text: 提取剩余文本
         - url: 提取 URL
+        - 通用 fallback: param=value 格式提取
+        - 位置 fallback: 从输入末尾按空格分隔的位置参数
         """
         import re
 
@@ -551,6 +553,30 @@ class Agent:
                 kv_match = re.search(rf'{pname}[=:：]\s*(\S+)', user_input)
                 if kv_match:
                     params[pname] = kv_match.group(1)
+
+        # ── 通用 fallback：未匹配的参数 ──
+        still_missing = [p for p in param_names if p not in params]
+        if not still_missing:
+            return params
+
+        # 1. 尝试 param=value 或 param: value 格式
+        for pname in list(still_missing):
+            kv_match = re.search(rf'{pname}\s*[=:：]\s*(\S+)', user_input)
+            if kv_match:
+                params[pname] = kv_match.group(1)
+                still_missing.remove(pname)
+
+        if not still_missing:
+            return params
+
+        # 2. 位置 fallback：从输入中提取位置参数
+        # 按空格拆分，过滤掉纯中文词（通常是工具名/命令词）
+        words = user_input.strip().split()
+        # 过滤掉纯中文词（保留含字母、数字、符号的 token）
+        value_words = [w for w in words if not re.fullmatch(r'[\u4e00-\u9fff]+', w)]
+        for i, pname in enumerate(still_missing):
+            if i < len(value_words):
+                params[pname] = value_words[i]
 
         return params
 
