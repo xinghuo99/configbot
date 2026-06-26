@@ -290,6 +290,18 @@ class Agent:
         """
         inp = user_input.lower().strip()
 
+        # ── 直接工具名匹配（最高优先级）──
+        # 如果用户输入中包含已注册工具的名称，直接使用该工具。
+        # 绕过评分系统和 LLM，防止 LLM 幻觉导致的错误路由。
+        for tool in self.tool_registry.list_all():
+            name_lower = tool.name.lower()
+            if len(name_lower) >= 3 and name_lower in inp:
+                schema = tool.get_schema()
+                param_names = list(schema.get("parameters", {}).get("properties", {}).keys())
+                params = self._extract_params(user_input, param_names)
+                logger.info("直接工具名匹配: %s → %s", user_input[:50], tool.name)
+                return {"type": "tool", "name": tool.name, "params": params}
+
         # ── Skill 生命周期管理指令 ──
 
         # 卸载 Skill: "卸载skill xxx" / "删除skill xxx"
